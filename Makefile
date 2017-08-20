@@ -1,162 +1,290 @@
-export CC  = gcc
+ifndef config
+ifneq ("$(wildcard ./config.mk)","")
+	config = config.mk
+else
+	config = make/config.mk
+endif
+endif
+
+ifndef DMLC_CORE
+	DMLC_CORE = dmlc-core
+endif
+
+ifndef RABIT
+	RABIT = rabit
+endif
+
+ROOTDIR = $(CURDIR)
+
+# workarounds for some buggy old make & msys2 versions seen in windows
+ifeq (NA, $(shell test ! -d "$(ROOTDIR)" && echo NA ))
+        $(warning Attempting to fix non-existing ROOTDIR [$(ROOTDIR)])
+        ROOTDIR := $(shell pwd)
+        $(warning New ROOTDIR [$(ROOTDIR)] $(shell test -d "$(ROOTDIR)" && echo " is OK" ))
+endif
+MAKE_OK := $(shell "$(MAKE)" -v 2> /dev/null)
+ifndef MAKE_OK
+        $(warning Attempting to recover non-functional MAKE [$(MAKE)])
+        MAKE := $(shell which make 2> /dev/null)
+        MAKE_OK := $(shell "$(MAKE)" -v 2> /dev/null)
+endif
+$(warning MAKE [$(MAKE)] - $(if $(MAKE_OK),checked OK,PROBLEM))
+
+ifeq ($(OS), Windows_NT)
+	UNAME="Windows"
+else
+	UNAME=$(shell uname)
+endif
+
+include $(config)
+ifeq ($(USE_OPENMP), 0)
+	export NO_OPENMP = 1
+endif
+include $(DMLC_CORE)/make/dmlc.mk
+
+# include the plugins
+ifdef XGB_PLUGINS
+include $(XGB_PLUGINS)
+endif
+
+# set compiler defaults for OSX versus *nix
+# let people override either
+OS := $(shell uname)
+ifeq ($(OS), Darwin)
+ifndef CC
+export CC = $(if $(shell which clang), clang, gcc)
+endif
+ifndef CXX
+export CXX = $(if $(shell which clang++), clang++, g++)
+endif
+else
+# linux defaults
+ifndef CC
+export CC = gcc
+endif
+ifndef CXX
 export CXX = g++
-export MPICXX = mpicxx
-export LDFLAGS= -pthread -lm 
-export CFLAGS = -Wall -O3 -msse2  -Wno-unknown-pragmas -funroll-loops
-# java include path
-export JAVAINCFLAGS = -I${JAVA_HOME}/include -I${JAVA_HOME}/include/linux -I./java
-
-ifeq ($(OS), Windows_NT)
-	export CXX = g++ -m64
-	export CC = gcc -m64
+endif
 endif
 
-ifeq ($(no_omp),1)
-	CFLAGS += -DDISABLE_OPENMP 
-else 
-	CFLAGS += -fopenmp
-endif
+export LDFLAGS= -pthread -lm $(ADD_LDFLAGS) $(DMLC_LDFLAGS) $(PLUGIN_LDFLAGS)
+export CFLAGS=  -std=c++11 -Wall -Wno-unknown-pragmas -Iinclude $(ADD_CFLAGS) $(PLUGIN_CFLAGS)
+CFLAGS += -I$(DMLC_CORE)/include -I$(RABIT)/include -I$(GTEST_PATH)/include
+#java include path
+export JAVAINCFLAGS = -I${JAVA_HOME}/include -I./java
 
-# by default use c++11
-ifeq ($(cxx11),1)
-	CFLAGS += -std=c++11
-endif
-
-# handling dmlc
-ifdef dmlc
-	ifndef config
-		ifneq ("$(wildcard $(dmlc)/config.mk)","")
-			config = $(dmlc)/config.mk
-		else
-			config = $(dmlc)/make/config.mk
-		endif	
-	endif
-	include $(config)
-	include $(dmlc)/make/dmlc.mk
-	LDFLAGS+= $(DMLC_LDFLAGS)
-	LIBDMLC=$(dmlc)/libdmlc.a
+ifeq ($(TEST_COVER), 1)
+	CFLAGS += -g -O0 -fprofile-arcs -ftest-coverage
 else
-	LIBDMLC=dmlc_simple.o
+	CFLAGS += -O3 -funroll-loops
+ifeq ($(USE_SSE), 1)
+	CFLAGS += -msse2
+endif
 endif
 
-ifndef WITH_FPIC
-	WITH_FPIC = 1
-endif
-ifeq ($(WITH_FPIC), 1)
-	CFLAGS += -fPIC	
+ifndef LINT_LANG
+	LINT_LANG= "all"
 endif
 
-
-ifeq ($(OS), Windows_NT)
-	LIBRABIT = subtree/rabit/lib/librabit_empty.a
-	SLIB = wrapper/xgboost_wrapper.dll
+ifeq ($(UNAME), Windows)
+	XGBOOST_DYLIB = lib/xgboost.dll
+	JAVAINCFLAGS += -I${JAVA_HOME}/include/win32
 else
-	LIBRABIT = subtree/rabit/lib/librabit.a
-	SLIB = wrapper/libxgboostwrapper.so
+ifeq ($(UNAME), Darwin)
+	XGBOOST_DYLIB = lib/libxgboost.dylib
+	CFLAGS += -fPIC
+else
+	XGBOOST_DYLIB = lib/libxgboost.so
+	CFLAGS += -fPIC
+endif
 endif
 
-# java lib
-JLIB = java/libxgboostjavawrapper.so
+ifeq ($(UNAME), Linux)
+	LDFLAGS += -lrt
+	JAVAINCFLAGS += -I${JAVA_HOME}/include/linux
+endif
+
+ifeq ($(UNAME), Darwin)
+	JAVAINCFLAGS += -I${JAVA_HOME}/include/darwin
+endif
+
+OPENMP_FLAGS =
+ifeq ($(USE_OPENMP), 1)
+	OPENMP_FLAGS = -fopenmp
+else
+	OPENMP_FLAGS = -DDISABLE_OPENMP
+endif
+CFLAGS += $(OPENMP_FLAGS)
+
+# for using GPUs
+GPU_COMPUTE_VER ?= 35 50 52 60 61
+NVCC = nvcc
+INCLUDES = -Iinclude -I$(DMLC_CORE)/include -I$(RABIT)/include
+INCLUDES += -I$(CUB_PATH)
+INCLUDES += -I$(GTEST_PATH)/include
+CODE = $(foreach ver,$(GPU_COMPUTE_VER),-gencode arch=compute_$(ver),code=sm_$(ver))
+NVCC_FLAGS = --std=c++11 $(CODE) $(INCLUDES) -lineinfo --expt-extended-lambda
+NVCC_FLAGS += -Xcompiler=$(OPENMP_FLAGS) -Xcompiler=-fPIC
+ifeq ($(PLUGIN_UPDATER_GPU),ON)
+  CUDA_ROOT = $(shell dirname $(shell dirname $(shell which $(NVCC))))
+  INCLUDES += -I$(CUDA_ROOT)/include -Inccl/src/
+  LDFLAGS += -L$(CUDA_ROOT)/lib64 -lcudart  -lcudadevrt -Lnccl/build/lib/ -lnccl_static -lm -ldl -lrt
+  CFLAGS += -DXGBOOST_USE_CUDA
+endif
 
 # specify tensor path
-BIN = xgboost
-MOCKBIN = xgboost.mock
-OBJ = updater.o gbm.o io.o main.o dmlc_simple.o
-MPIBIN =
-ifeq ($(WITH_FPIC), 1)
-	TARGET = $(BIN) $(OBJ) $(SLIB)
-else
-	TARGET = $(BIN)
+.PHONY: clean all lint clean_all doxygen rcpplint pypack Rpack Rbuild Rcheck java pylint
+
+all: lib/libxgboost.a $(XGBOOST_DYLIB) xgboost
+
+$(DMLC_CORE)/libdmlc.a: $(wildcard $(DMLC_CORE)/src/*.cc $(DMLC_CORE)/src/*/*.cc)
+	+ cd $(DMLC_CORE); $(MAKE) libdmlc.a config=$(ROOTDIR)/$(config); cd $(ROOTDIR)
+
+$(RABIT)/lib/$(LIB_RABIT): $(wildcard $(RABIT)/src/*.cc)
+	+ cd $(RABIT); $(MAKE) lib/$(LIB_RABIT) USE_SSE=$(USE_SSE); cd $(ROOTDIR)
+
+jvm: jvm-packages/lib/libxgboost4j.so
+
+SRC = $(wildcard src/*.cc src/*/*.cc)
+ALL_OBJ = $(patsubst src/%.cc, build/%.o, $(SRC)) $(PLUGIN_OBJS)
+AMALGA_OBJ = amalgamation/xgboost-all0.o
+LIB_DEP = $(DMLC_CORE)/libdmlc.a $(RABIT)/lib/$(LIB_RABIT)
+ALL_DEP = $(filter-out build/cli_main.o, $(ALL_OBJ)) $(LIB_DEP)
+CLI_OBJ = build/cli_main.o
+include tests/cpp/xgboost_test.mk
+
+# order of this rule matters wrt %.cc rule below!
+build/%.o: src/%.cu
+	@mkdir -p $(@D)
+	$(NVCC) -c $(NVCC_FLAGS) $< -o $@
+
+build/%.o: src/%.cc
+	@mkdir -p $(@D)
+	$(CXX) $(CFLAGS) -MM -MT build/$*.o $< >build/$*.d
+	$(CXX) -c $(CFLAGS) $< -o $@
+
+# order of this rule matters wrt %.cc rule below!
+build_plugin/%.o: plugin/%.cu build_nccl
+	@mkdir -p $(@D)
+	$(NVCC) -c $(NVCC_FLAGS) $< -o $@
+
+build_plugin/%.o: plugin/%.cc
+	@mkdir -p $(@D)
+	$(CXX) $(CFLAGS) -MM -MT build_plugin/$*.o $< >build_plugin/$*.d
+	$(CXX) -c $(CFLAGS) $< -o $@
+
+build_nccl:
+	@mkdir -p build/include
+	cd build/include ; ln -sf ../../nccl/src/nccl.h .
+	cd nccl ; make -j ; cd ..
+
+# The should be equivalent to $(ALL_OBJ)  except for build/cli_main.o
+amalgamation/xgboost-all0.o: amalgamation/xgboost-all0.cc
+	$(CXX) -c $(CFLAGS) $< -o $@
+
+# Equivalent to lib/libxgboost_all.so
+lib/libxgboost_all.so: $(AMALGA_OBJ) $(LIB_DEP)
+	@mkdir -p $(@D)
+	$(CXX) $(CFLAGS) -shared -o $@ $(filter %.o %.a, $^) $(LDFLAGS)
+
+lib/libxgboost.a: $(ALL_DEP)
+	@mkdir -p $(@D)
+	ar crv $@ $(filter %.o, $?)
+
+lib/xgboost.dll lib/libxgboost.so lib/libxgboost.dylib: $(ALL_DEP)
+	@mkdir -p $(@D)
+	$(CXX) $(CFLAGS) -shared -o $@ $(filter %.o %a,  $^) $(LDFLAGS)
+
+jvm-packages/lib/libxgboost4j.so: jvm-packages/xgboost4j/src/native/xgboost4j.cpp $(ALL_DEP)
+	@mkdir -p $(@D)
+	$(CXX) $(CFLAGS) $(JAVAINCFLAGS) -shared -o $@ $(filter %.cpp %.o %.a, $^) $(LDFLAGS)
+
+
+xgboost: $(CLI_OBJ) $(ALL_DEP)
+	$(CXX) $(CFLAGS) -o $@  $(filter %.o %.a, $^)  $(LDFLAGS)
+
+rcpplint:
+	python2 dmlc-core/scripts/lint.py xgboost ${LINT_LANG} R-package/src
+
+lint: rcpplint
+	python2 dmlc-core/scripts/lint.py xgboost ${LINT_LANG} include src plugin python-package
+
+pylint:
+	flake8 --ignore E501 python-package
+	flake8 --ignore E501 tests/python
+
+test: $(ALL_TEST)
+	./plugin/updater_gpu/test/cpp/generate_data.sh
+	$(ALL_TEST)
+
+check: test
+	./tests/cpp/xgboost_test
+
+ifeq ($(TEST_COVER), 1)
+cover: check
+	@- $(foreach COV_OBJ, $(COVER_OBJ), \
+		gcov -pbcul -o $(shell dirname $(COV_OBJ)) $(COV_OBJ) > gcov.log || cat gcov.log; \
+	)
 endif
 
-.PHONY: clean all mpi python Rpack
+clean:
+	$(RM) -rf build build_plugin lib bin *~ */*~ */*/*~ */*/*/*~ */*.o */*/*.o */*/*/*.o #xgboost
+	$(RM) -rf build_tests *.gcov tests/cpp/xgboost_test
+	cd R-package/src; $(RM) -rf rabit src include dmlc-core amalgamation *.so *.dll; cd $(ROOTDIR)
 
-all: $(TARGET)
-mpi: $(MPIBIN)
+clean_all: clean
+	cd $(DMLC_CORE); $(MAKE) clean; cd $(ROOTDIR)
+	cd $(RABIT); $(MAKE) clean; cd $(ROOTDIR)
 
-python: wrapper/libxgboostwrapper.so
-# now the wrapper takes in two files. io and wrapper part
-updater.o: src/tree/updater.cpp  src/tree/*.hpp src/*.h src/tree/*.h src/utils/*.h
-dmlc_simple.o: src/io/dmlc_simple.cpp src/utils/*.h
-gbm.o: src/gbm/gbm.cpp src/gbm/*.hpp src/gbm/*.h 
-io.o: src/io/io.cpp src/io/*.hpp src/utils/*.h src/learner/dmatrix.h src/*.h
-main.o: src/xgboost_main.cpp src/utils/*.h src/*.h src/learner/*.hpp src/learner/*.h 
-xgboost:  updater.o gbm.o io.o main.o $(LIBRABIT) $(LIBDMLC)
-wrapper/xgboost_wrapper.dll wrapper/libxgboostwrapper.so: wrapper/xgboost_wrapper.cpp src/utils/*.h src/*.h src/learner/*.hpp src/learner/*.h  updater.o gbm.o io.o $(LIBRABIT) $(LIBDMLC)
+doxygen:
+	doxygen doc/Doxyfile
 
-java: java/libxgboostjavawrapper.so
-java/libxgboostjavawrapper.so: java/xgboost4j_wrapper.cpp wrapper/xgboost_wrapper.cpp src/utils/*.h src/*.h src/learner/*.hpp src/learner/*.h  updater.o gbm.o io.o $(LIBRABIT) $(LIBDMLC)
+# create standalone python tar file.
+pypack: ${XGBOOST_DYLIB}
+	cp ${XGBOOST_DYLIB} python-package/xgboost
+	cd python-package; tar cf xgboost.tar xgboost; cd ..
 
-# dependency on rabit
-subtree/rabit/lib/librabit.a: subtree/rabit/src/engine.cc
-	+	cd subtree/rabit;make lib/librabit.a; cd ../..
-subtree/rabit/lib/librabit_empty.a: subtree/rabit/src/engine_empty.cc
-	+	cd subtree/rabit;make lib/librabit_empty.a; cd ../..
-subtree/rabit/lib/librabit_mock.a: subtree/rabit/src/engine_mock.cc
-	+	cd subtree/rabit;make lib/librabit_mock.a; cd ../..
-subtree/rabit/lib/librabit_mpi.a: subtree/rabit/src/engine_mpi.cc
-	+	cd subtree/rabit;make lib/librabit_mpi.a; cd ../..
+# create pip installation pack for PyPI
+pippack: clean_all
+	rm -rf xgboost-python
+	cp -r python-package xgboost-python
+	cp -r Makefile xgboost-python/xgboost/
+	cp -r make xgboost-python/xgboost/
+	cp -r src xgboost-python/xgboost/
+	cp -r include xgboost-python/xgboost/
+	cp -r dmlc-core xgboost-python/xgboost/
+	cp -r rabit xgboost-python/xgboost/
 
-$(BIN) : 
-	$(CXX) $(CFLAGS) -fPIC -o $@ $(filter %.cpp %.o %.c %.cc %.a, $^) $(LDFLAGS) 
-
-$(MOCKBIN) : 
-	$(CXX) $(CFLAGS) -o $@ $(filter %.cpp %.o %.c %.cc %.a, $^) $(LDFLAGS) 
-
-$(SLIB) :
-	$(CXX) $(CFLAGS) -fPIC -shared -o $@ $(filter %.cpp %.o %.c %.a %.cc, $^) $(LDFLAGS) $(DLLFLAGS)
-
-$(JLIB) :
-	$(CXX) $(CFLAGS) -fPIC -shared -o $@ $(filter %.cpp %.o %.c %.a %.cc, $^) $(LDFLAGS)  $(JAVAINCFLAGS)
-
-$(OBJ) : 
-	$(CXX) -c $(CFLAGS) -o $@ $(firstword $(filter %.cpp %.c %.cc, $^) )
-
-$(MPIOBJ) : 
-	$(MPICXX) -c $(CFLAGS) -o $@ $(firstword $(filter %.cpp %.c, $^) ) 
-
-$(MPIBIN) : 
-	$(MPICXX) $(CFLAGS) -o $@ $(filter %.cpp %.o %.c %.cc %.a, $^) $(LDFLAGS)
-
-install:
-	cp -f -r $(BIN)  $(INSTALL_PATH)
-
-Rpack:
-	make clean
-	cd subtree/rabit;make clean;cd ..
+# Script to make a clean installable R package.
+Rpack: clean_all
 	rm -rf xgboost xgboost*.tar.gz
 	cp -r R-package xgboost
 	rm -rf xgboost/src/*.o xgboost/src/*.so xgboost/src/*.dll
 	rm -rf xgboost/src/*/*.o
-	rm -rf subtree/rabit/src/*.o
 	rm -rf xgboost/demo/*.model xgboost/demo/*.buffer xgboost/demo/*.txt
 	rm -rf xgboost/demo/runall.R
 	cp -r src xgboost/src/src
-	mkdir xgboost/src/subtree
-	mkdir xgboost/src/subtree/rabit
-	cp -r subtree/rabit/include xgboost/src/subtree/rabit/include
-	cp -r subtree/rabit/src xgboost/src/subtree/rabit/src
-	rm -rf xgboost/src/subtree/rabit/src/*.o
-	mkdir xgboost/src/wrapper
-	cp  wrapper/xgboost_wrapper.h xgboost/src/wrapper
-	cp  wrapper/xgboost_wrapper.cpp xgboost/src/wrapper
+	cp -r include xgboost/src/include
+	cp -r amalgamation xgboost/src/amalgamation
+	mkdir -p xgboost/src/rabit
+	cp -r rabit/include xgboost/src/rabit/include
+	cp -r rabit/src xgboost/src/rabit/src
+	rm -rf xgboost/src/rabit/src/*.o
+	mkdir -p xgboost/src/dmlc-core
+	cp -r dmlc-core/include xgboost/src/dmlc-core/include
+	cp -r dmlc-core/src xgboost/src/dmlc-core/src
 	cp ./LICENSE xgboost
-	cat R-package/src/Makevars|sed '2s/.*/PKGROOT=./' > xgboost/src/Makevars
-	cp xgboost/src/Makevars xgboost/src/Makevars.win
-	# R CMD build --no-build-vignettes xgboost
-	# R CMD build xgboost
-	# rm -rf xgboost
-	# R CMD check --as-cran xgboost*.tar.gz
+	cat R-package/src/Makevars.in|sed '2s/.*/PKGROOT=./' | sed '3s/.*/ENABLE_STD_THREAD=0/' > xgboost/src/Makevars.in
+	cp xgboost/src/Makevars.in xgboost/src/Makevars.win
+	sed -i -e 's/@OPENMP_CXXFLAGS@/$$\(SHLIB_OPENMP_CFLAGS\)/g' xgboost/src/Makevars.win
 
-Rbuild:
-	make Rpack
-	R CMD build xgboost
+Rbuild: Rpack
+	R CMD build --no-build-vignettes xgboost
 	rm -rf xgboost
 
-Rcheck:
-	make Rbuild
-	R CMD check --as-cran xgboost*.tar.gz
+Rcheck: Rbuild
+	R CMD check  xgboost*.tar.gz
 
-clean:
-	$(RM) -rf $(OBJ) $(BIN) $(MPIBIN) $(MPIOBJ) $(SLIB) *.o  */*.o */*/*.o *~ */*~ */*/*~
-	cd subtree/rabit; make clean; cd ..
+-include build/*.d
+-include build/*/*.d
+-include build_plugin/*/*.d

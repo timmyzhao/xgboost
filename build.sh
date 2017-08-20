@@ -5,7 +5,7 @@
 # In most cases, type make will give what you want.
 
 # See additional instruction in doc/build.md
-
+set -e
 
 if make; then
     echo "Successfully build multi-thread xgboost"
@@ -13,9 +13,13 @@ else
     echo "-----------------------------"
     echo "Building multi-thread xgboost failed"
     echo "Start to build single-thread xgboost"
-    make clean
-    make no_omp=1
-    echo "Successfully build single-thread xgboost"
-    echo "If you want multi-threaded version"
-    echo "See additional instructions in doc/build.md"
+    make clean_all
+    make config=make/minimum.mk
+    if [ $? -eq 0 ] ;then
+      echo "Successfully build single-thread xgboost"
+      echo "If you want multi-threaded version"
+      echo "See additional instructions in doc/build.md"
+    else
+      echo "Failed to build single-thread xgboost"
+    fi
 fi
